@@ -32,6 +32,8 @@ struct ConnectionEventChannel {
 #[derive(Debug)]
 enum ApplicationEvent {
     Connected,
+    LampOn,
+    LampOff,
     ChatMessage(String),
     Disconnected(String), // Include a reason for disconnection
 }
@@ -58,6 +60,9 @@ struct WorldData {
     depth: usize
 }
 
+#[derive(Component)]
+struct GlowingCube;
+
 fn main() {
     // env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     // App::new().add_systems(Startup, connect_to_server).run();
@@ -78,7 +83,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup_ui)
         .add_systems(Startup, start_connection_task)
-        .add_systems(Update, update_connection_status)
+        .add_systems(Update, process_application_event)
         .run();
 }
 
@@ -113,14 +118,15 @@ fn setup_ui(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materi
         ..default()
     });
 
-
-    // Green cube in the 3D world:
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)), // Access meshes through ResMut
-        material: materials.add(Color::rgb(0.0, 1.0, 0.0)), // Access materials through ResMut and use Color::rgb()
-        transform: Transform::from_xyz(0.0, 0.5, 0.0),
-        ..default()
-    });
+    commands.spawn((
+        PbrBundle {
+            mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+            material: materials.add(Color::rgb(0.0, 1.0, 0.0)), // Initial green color
+            transform: Transform::from_xyz(0.0, 0.5, 0.0),
+            ..default()
+        },
+        GlowingCube, // Mark this cube as the one that glows
+    ));
 
 }
 
@@ -249,12 +255,13 @@ fn start_connection_task(
 
 }
 
-fn update_connection_status(
+fn process_application_event(
     mut connection_status: ResMut<ConnectionStatus>,
-    mut query: Query<&mut Text>,
+    mut text_query: Query<&mut Text>, // Renamed for clarity
     mut event_receiver: ResMut<ConnectionEventChannel>,
+    mut material_query: Query<&mut Handle<StandardMaterial>, With<GlowingCube>>, // Query for material
+    mut materials: ResMut<Assets<StandardMaterial>>, // Access to materials
 ) {
-    // Drain the channel of all pending events at once
     while let Ok(event) = event_receiver.receiver.try_recv() {
         println!("Received event: {:?}", event);
         match event {
@@ -273,16 +280,27 @@ fn update_connection_status(
                 connection_status.decoder = None;
                 connection_status.encoder = None;
             }
+            ApplicationEvent::LampOn => {
+                if let Ok(mut material_handle) = material_query.get_single_mut() {
+                    let mut material = materials.get_mut(&*material_handle).unwrap();
+                    material.base_color = Color::rgb(1.0, 1.0, 0.0);
+                }
+            }
+            ApplicationEvent::LampOff => {
+                if let Ok(mut material_handle) = material_query.get_single_mut() {
+                    let mut material = materials.get_mut(&*material_handle).unwrap();
+                    material.base_color = Color::rgb(0.0, 1.0, 0.0);
+                }
+            }
         }
     }
 
-    let mut text = query.single_mut();
+    let mut text = text_query.single_mut(); // Use renamed query
     if text.sections[0].value != connection_status.message {
         println!("Connection status message updated: {}", connection_status.message);
         text.sections[0].value = connection_status.message.clone();
     }
 }
-
 fn connect_to_server(connection_status: &mut ConnectionStatus) {
     let server_address = "127.0.0.1:25565";
 
@@ -582,10 +600,10 @@ async fn process_packet(
             // Safely get the "Lit" property and handle potential absence
             if let Some(PropValue::True) = packet.block_id.get(PropName::Lit) {
                 println!("Block is lit, turning on LED.");
-                sender.send(ApplicationEvent::ChatMessage("Led - on.".to_string())).await.unwrap();
+                sender.send(ApplicationEvent::LampOn).await.unwrap();
             } else {
                 println!("Block is not lit, turning off LED.");
-                sender.send(ApplicationEvent::ChatMessage("Led - off.".to_string())).await.unwrap();
+                sender.send(ApplicationEvent::LampOff).await.unwrap();
             }
         }
 
