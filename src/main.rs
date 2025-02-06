@@ -43,6 +43,7 @@ struct ServerAddress(String);
 fn main() {
     // env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     // App::new().add_systems(Startup, connect_to_server).run();
+    let (sender, receiver) = mpsc::channel(32);
     App::new()
         .insert_resource(ServerAddress("127.0.0.1:25565".to_string()))
         .insert_resource(ConnectionStatus {
@@ -53,15 +54,14 @@ fn main() {
             encoder: None,
         })
         .insert_resource(ConnectionEventChannel {
-            sender: mpsc::channel(32).0,
-            receiver: mpsc::channel(32).1,
+            sender,
+            receiver,
         })
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup_ui)
-        // .add_systems(Startup, connect_to_server)
         .add_systems(Startup, start_connection_task)
         .add_systems(Update, update_connection_status)
-        .add_systems(Update, handle_server_messages)
+        // .add_systems(Update, handle_server_messages)
         .run();
 }
 
@@ -91,34 +91,67 @@ async fn connect_and_handle(
     sender: mpsc::Sender<ConnectionEvent>,
     server_address: String,
 ) {
-    println!("Connecting to server at {}", server_address);
-    match TcpStream::connect(&server_address) { // Use the address
+    match TcpStream::connect(&server_address) {
         Ok(stream) => {
             println!("Successfully connected to server at {}", server_address);
+
+            let _ = sender.send(ConnectionEvent::Connected).await;
+
             let mut connection_status = ConnectionStatus {
                 message: String::new(),
                 connected: true,
-                stream: Some(stream),
+                stream: Some(stream), // Store the connected stream
                 decoder: Some(PacketDecoder::new()),
                 encoder: Some(PacketEncoder::new()),
             };
 
-            let _ = sender.send(ConnectionEvent::Connected).await;
+            connect_to_server_inner(&mut connection_status); // Perform handshake/login
 
-            connect_to_server(&mut connection_status); // Call the connect function
-            handle_server_messages_inner(&mut connection_status); // Call inner function
+            handle_server_messages_inner(&mut connection_status, sender.clone()).await;
 
-            let _ = sender.send(ConnectionEvent::Disconnected("Connection closed".to_string())).await;
+            let _ = sender.send(ConnectionEvent::Disconnected("Connection closed".to_string())).await; // Signal disconnection
         }
         Err(e) => {
             println!("Failed to connect to server at {}: {}", server_address, e);
-            let _ = sender.send(ConnectionEvent::Disconnected(e.to_string())).await;
+            let _ = sender.send(ConnectionEvent::Disconnected(e.to_string())).await; // Signal disconnection with error
         }
     }
 }
 
+fn connect_to_server_inner(connection_status: &mut ConnectionStatus) {
 
+    let mut enc = connection_status.encoder.take().unwrap(); // Take encoder
 
+    // Handshake
+    let next_state = valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState::Login;
+    let handshake_packet = valence_protocol::packets::handshaking::handshake_c2s::HandshakeC2s {
+        protocol_version: VarInt(763),
+        server_address: valence_protocol::Bounded("127.0.0.1"), // Or use server_address variable
+        server_port: 25566,
+        next_state,
+    };
+
+    enc.append_packet(&handshake_packet)
+        .expect("Failed to encode handshake packet");
+    connection_status.stream.as_mut().unwrap() // Use the existing stream
+        .write_all(&enc.take())
+        .expect("Failed to send handshake packet");
+
+    // Login
+    let login_start_packet =
+        valence_protocol::packets::login::login_hello_c2s::LoginHelloC2s {
+            username: valence_protocol::Bounded("ESP32-S3"), // Replace with your username
+            profile_id: None,                                // Optional in offline mode
+        };
+
+    enc.append_packet(&login_start_packet)
+        .expect("Failed to encode LoginHelloC2s packet");
+    connection_status.stream.as_mut().unwrap() // Use the existing stream
+        .write_all(&enc.take())
+        .expect("Failed to send handshake packet");
+
+    connection_status.encoder = Some(enc); // Put encoder back
+}
 
 fn start_connection_task(
     mut commands: Commands,
@@ -144,9 +177,12 @@ fn update_connection_status(
     mut query: Query<&mut Text>,
     mut event_receiver: ResMut<ConnectionEventChannel>,
 ) {
+    // Drain the channel of all pending events at once
     while let Ok(event) = event_receiver.receiver.try_recv() {
+        println!("Received event: {:?}", event);
         match event {
             ConnectionEvent::Connected => {
+                println!("** Received Connected");
                 connection_status.message = "Connected!".to_string();
                 connection_status.connected = true;
             }
@@ -161,7 +197,10 @@ fn update_connection_status(
     }
 
     let mut text = query.single_mut();
-    text.sections[0].value = connection_status.message.clone();
+    if text.sections[0].value != connection_status.message {
+        println!("Connection status message updated: {}", connection_status.message);
+        text.sections[0].value = connection_status.message.clone();
+    }
 }
 
 fn connect_to_server(connection_status: &mut ConnectionStatus) {
@@ -217,15 +256,7 @@ fn connect_to_server(connection_status: &mut ConnectionStatus) {
     }
 }
 
-fn handle_server_messages(
-    mut connection_status: ResMut<ConnectionStatus>, // Correct system signature
-) {
-    if connection_status.connected {
-        handle_server_messages_inner(&mut *connection_status); // Dereference for inner function
-    }
-}
-
-fn handle_server_messages_inner(connection_status: &mut ConnectionStatus) { // Inner function
+async fn handle_server_messages_inner(connection_status: &mut ConnectionStatus, sender: mpsc::Sender<ConnectionEvent>) {
     if !connection_status.connected {
         return;
     }
@@ -249,7 +280,7 @@ fn handle_server_messages_inner(connection_status: &mut ConnectionStatus) { // I
                 dec.queue_bytes((&buffer[..size]).into());
 
                 while let Ok(Some(frame)) = dec.try_next_packet() {
-                    if let Err(e) = process_packet(frame, &mut dec, &mut enc, &mut stream) {
+                    if let Err(e) = process_packet(frame, &mut dec, &mut enc, &mut stream, sender.clone()).await {
                         println!("Error processing packet or disconnection: {:?}", e);
                         connection_status.message = "Connection closed.".to_string();
                         connection_status.connected = false;
@@ -271,13 +302,13 @@ fn handle_server_messages_inner(connection_status: &mut ConnectionStatus) { // I
     connection_status.stream = Some(stream);
 }
 
-fn process_packet(
+async fn process_packet(
     frame: PacketFrame,
     dec: &mut PacketDecoder,
     enc: &mut PacketEncoder,
     // socket: &mut TcpSocket<'_>,
     stream: &mut TcpStream,
-    // sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, HardwareEvent, 1>,
+    sender: mpsc::Sender<ConnectionEvent>,
 ) -> Result<(), ()> {
     match frame.id {
         LoginCompressionS2c::ID => {
@@ -342,6 +373,7 @@ fn process_packet(
                 }
             }
             stream.flush().unwrap();
+            sender.send(ConnectionEvent::Connected).await.unwrap();
         }
         ChatMessageS2c::ID => {
             let packet: ChatMessageS2c =
