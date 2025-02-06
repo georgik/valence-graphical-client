@@ -3,6 +3,7 @@ mod networking;
 mod events;
 mod rendering;
 mod world;
+mod controls;
 
 use valence_protocol::block::{PropName, PropValue};
 use valence_protocol::packets::play::BlockUpdateS2c;
@@ -18,6 +19,7 @@ use valence_protocol::Packet;
 use connection::{connect_and_handle, ConnectionStatus};
 use events::ApplicationEvent;
 use crate::rendering::setup_ui;
+use controls::handle_keyboard_input;
 
 
 #[derive(Resource)]
@@ -64,6 +66,7 @@ fn main() {
         .add_systems(Startup, setup_ui)
         .add_systems(Startup, start_connection_task)
         .add_systems(Update, process_application_event)
+        .add_systems(Update, handle_keyboard_input)
         .run();
 }
 
