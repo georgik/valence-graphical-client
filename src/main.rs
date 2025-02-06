@@ -1,4 +1,4 @@
-use valence_protocol::block::PropName;
+use valence_protocol::block::{PropName, PropValue};
 use valence_protocol::packets::play::BlockUpdateS2c;
 use bevy::prelude::*;
 use std::io::{Read, Write};
@@ -24,13 +24,14 @@ struct ConnectionStatus {
 
 #[derive(Resource)]
 struct ConnectionEventChannel {
-    sender: mpsc::Sender<ConnectionEvent>,
-    receiver: mpsc::Receiver<ConnectionEvent>,
+    sender: mpsc::Sender<ApplicationEvent>,
+    receiver: mpsc::Receiver<ApplicationEvent>,
 }
 
 #[derive(Debug)]
-enum ConnectionEvent {
+enum ApplicationEvent {
     Connected,
+    ChatMessage(String),
     Disconnected(String), // Include a reason for disconnection
 }
 
@@ -88,14 +89,14 @@ fn setup_ui(mut commands: Commands) {
 }
 
 async fn connect_and_handle(
-    sender: mpsc::Sender<ConnectionEvent>,
+    sender: mpsc::Sender<ApplicationEvent>,
     server_address: String,
 ) {
     match TcpStream::connect(&server_address) {
         Ok(stream) => {
             println!("Successfully connected to server at {}", server_address);
 
-            let _ = sender.send(ConnectionEvent::Connected).await;
+            let _ = sender.send(ApplicationEvent::Connected).await;
 
             let mut connection_status = ConnectionStatus {
                 message: String::new(),
@@ -109,11 +110,11 @@ async fn connect_and_handle(
 
             handle_server_messages_inner(&mut connection_status, sender.clone()).await;
 
-            let _ = sender.send(ConnectionEvent::Disconnected("Connection closed".to_string())).await; // Signal disconnection
+            let _ = sender.send(ApplicationEvent::Disconnected("Connection closed".to_string())).await; // Signal disconnection
         }
         Err(e) => {
             println!("Failed to connect to server at {}: {}", server_address, e);
-            let _ = sender.send(ConnectionEvent::Disconnected(e.to_string())).await; // Signal disconnection with error
+            let _ = sender.send(ApplicationEvent::Disconnected(e.to_string())).await; // Signal disconnection with error
         }
     }
 }
@@ -181,12 +182,15 @@ fn update_connection_status(
     while let Ok(event) = event_receiver.receiver.try_recv() {
         println!("Received event: {:?}", event);
         match event {
-            ConnectionEvent::Connected => {
-                println!("** Received Connected");
+            ApplicationEvent::Connected => {
                 connection_status.message = "Connected!".to_string();
                 connection_status.connected = true;
             }
-            ConnectionEvent::Disconnected(reason) => {
+            ApplicationEvent::ChatMessage(message) => {
+                println!("** Received ChatMessage: {}", message);
+                connection_status.message = message;
+            }
+            ApplicationEvent::Disconnected(reason) => {
                 connection_status.message = format!("Connection failed: {}", reason);
                 connection_status.connected = false;
                 connection_status.stream = None;
@@ -256,7 +260,7 @@ fn connect_to_server(connection_status: &mut ConnectionStatus) {
     }
 }
 
-async fn handle_server_messages_inner(connection_status: &mut ConnectionStatus, sender: mpsc::Sender<ConnectionEvent>) {
+async fn handle_server_messages_inner(connection_status: &mut ConnectionStatus, sender: mpsc::Sender<ApplicationEvent>) {
     if !connection_status.connected {
         return;
     }
@@ -308,7 +312,7 @@ async fn process_packet(
     enc: &mut PacketEncoder,
     // socket: &mut TcpSocket<'_>,
     stream: &mut TcpStream,
-    sender: mpsc::Sender<ConnectionEvent>,
+    sender: mpsc::Sender<ApplicationEvent>,
 ) -> Result<(), ()> {
     match frame.id {
         LoginCompressionS2c::ID => {
@@ -373,7 +377,7 @@ async fn process_packet(
                 }
             }
             stream.flush().unwrap();
-            sender.send(ConnectionEvent::Connected).await.unwrap();
+            sender.send(ApplicationEvent::Connected).await.unwrap();
         }
         ChatMessageS2c::ID => {
             let packet: ChatMessageS2c =
@@ -500,17 +504,13 @@ async fn process_packet(
             };
 
             // Safely get the "Lit" property and handle potential absence
-            // if let Some(PropValue::True) = packet.block_id.get(PropName::Lit) {
-            //     println!("Block is lit, turning on LED.");
-            //     if let Err(err) = sender.try_send(HardwareEvent::TurnOnLed) {
-            //         println!("Failed to send TurnOnLed event: {:?}", err);
-            //     }
-            // } else {
-            //     println!("Block is not lit, turning off LED.");
-            //     if let Err(err) = sender.try_send(HardwareEvent::TurnOffLed) {
-            //         println!("Failed to send TurnOffLed event: {:?}", err);
-            //     }
-            // }
+            if let Some(PropValue::True) = packet.block_id.get(PropName::Lit) {
+                println!("Block is lit, turning on LED.");
+                sender.send(ApplicationEvent::ChatMessage("Led - on.".to_string())).await.unwrap();
+            } else {
+                println!("Block is not lit, turning off LED.");
+                sender.send(ApplicationEvent::ChatMessage("Led - off.".to_string())).await.unwrap();
+            }
         }
 
         _ => println!("Unhandled packet ID: 0x{:X}", frame.id),
