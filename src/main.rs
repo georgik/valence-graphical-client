@@ -3,6 +3,7 @@ use valence_protocol::packets::play::BlockUpdateS2c;
 use bevy::prelude::*;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use bevy::render::view::NoFrustumCulling;
 use bevy::tasks::AsyncComputeTaskPool;
 use tokio::sync::mpsc;
 use valence_protocol::{PacketDecoder, PacketEncoder, VarInt};
@@ -41,6 +42,22 @@ struct ConnectionTask;
 #[derive(Resource)]
 struct ServerAddress(String);
 
+#[derive(Component)]
+struct WorldCube {
+    x: usize,
+    y: usize,
+    z: usize,
+}
+
+#[derive(Resource)]
+struct WorldData {
+    // Store world data here.  For example, a 2D grid of block colors:
+    blocks: Vec<Vec<Vec<Color>>>,
+    width: usize,
+    height: usize,
+    depth: usize
+}
+
 fn main() {
     // env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     // App::new().add_systems(Startup, connect_to_server).run();
@@ -62,14 +79,22 @@ fn main() {
         .add_systems(Startup, setup_ui)
         .add_systems(Startup, start_connection_task)
         .add_systems(Update, update_connection_status)
-        // .add_systems(Update, handle_server_messages)
         .run();
 }
 
-fn setup_ui(mut commands: Commands) {
-    // Add a 2D camera specifically for UI rendering
-    commands.spawn(Camera2dBundle::default());
 
+
+fn setup_ui(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+    // 3D Camera
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_xyz(16.0, 16.0, 16.0).looking_at(Vec3::new(8.0, 0.0, 8.0), Vec3::Y),
+            ..default()
+        },
+        NoFrustumCulling,
+    ));
+
+    // Text HUD
     commands.spawn(TextBundle {
         text: Text::from_section(
             "Connecting...",
@@ -80,12 +105,63 @@ fn setup_ui(mut commands: Commands) {
             },
         ),
         style: Style {
-            align_self: AlignSelf::Center,
-            margin: UiRect::all(Val::Auto),
+            position_type: PositionType::Absolute, // Important for HUD
+            top: Val::Px(10.0),
+            left: Val::Px(10.0),
             ..default()
         },
         ..default()
     });
+
+
+    // Green cube in the 3D world:
+    commands.spawn(PbrBundle {
+        mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)), // Access meshes through ResMut
+        material: materials.add(Color::rgb(0.0, 1.0, 0.0)), // Access materials through ResMut and use Color::rgb()
+        transform: Transform::from_xyz(0.0, 0.5, 0.0),
+        ..default()
+    });
+
+}
+
+
+#[derive(Component)]
+struct WorldMesh;
+
+fn update_world_mesh(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>, // Use StandardMaterial
+    world_data: Res<WorldData>,
+) {
+    if world_data.is_changed() {
+        // Clear existing cubes
+
+
+        if !world_data.blocks.is_empty() {
+            let width = world_data.width;
+            let height = world_data.height;
+            let depth = world_data.depth; // Assuming you have depth in your world data
+
+            for x in 0..width {
+                for y in 0..height {
+                    for z in 0..depth {
+                        let color = world_data.blocks[x][y][z]; // Access 3D block data
+
+                        commands.spawn((
+                            PbrBundle { // Use PbrBundle for 3D
+                                mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)), // Create a cube mesh
+                                material: materials.add(color), // Use the block color as material
+                                transform: Transform::from_xyz(x as f32, y as f32, z as f32),
+                                ..default()
+                            },
+                            WorldCube { x, y, z },
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn connect_and_handle(
@@ -338,8 +414,8 @@ async fn process_packet(
             );
         }
         GameJoinS2c::ID => {
-            // Assuming the player successfully joined the game world.
-            println!("GameJoin - skipping deserialization - requires binary compound support");
+            println!("GameJoinS2c");
+            let packet: GameJoinS2c = frame.decode().expect("Failed to decode GameJoinS2c");
 
         }
         PlayerPositionLookS2c::ID => {
