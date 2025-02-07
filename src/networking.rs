@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Write;
 use std::net::TcpStream;
 use tokio::sync::mpsc;
@@ -6,10 +7,11 @@ use valence_protocol::{PacketDecoder, PacketEncoder};
 use valence_protocol::block::{PropName, PropValue};
 use valence_protocol::packets::login::{LoginCompressionS2c, LoginSuccessS2c};
 use valence_protocol::packets::play::{AdvancementUpdateS2c, BlockUpdateS2c, ChatMessageC2s, ChatMessageS2c, ChunkDataS2c, CommandTreeS2c, DisconnectS2c, EntityAttributesS2c, EntitySetHeadYawS2c, EntityStatusS2c, GameJoinS2c, GameMessageS2c, HealthUpdateS2c, KeepAliveC2s, KeepAliveS2c, PlayerAbilitiesS2c, PlayerListS2c, PlayerPositionLookS2c, PlayerSpawnPositionS2c, RotateS2c, ScreenHandlerSlotUpdateS2c, SynchronizeTagsS2c, UpdateSelectedSlotS2c};
-use crate::events::ApplicationEvent;
+use crate::events::{ApplicationEvent, ChunkBlockData};
 use crate::connection::ConnectionStatus;
 use std::io::Read;
 use valence_protocol::Packet;
+use crate::events::ApplicationEvent::ChunkData;
 
 pub(crate) async fn handle_server_messages_inner(connection_status: &mut ConnectionStatus, sender: mpsc::Sender<ApplicationEvent>) {
     if !connection_status.connected {
@@ -150,7 +152,16 @@ async fn process_packet(
             );
         }
         ChunkDataS2c::ID => {
-            println!("Received chunk data.");
+            let packet: ChunkDataS2c = frame.decode().expect("Failed to decode ChunkDataS2c");
+
+            println!("Chunk data received");
+            println!("Position: x={}, z={}, count={}", packet.pos.x, packet.pos.z, packet.blocks_and_biomes.len());
+            let data = ChunkBlockData {
+                pos: valence_protocol::ChunkPos { x: packet.pos.x, z: packet.pos.z },
+                blocks: packet.blocks_and_biomes.to_vec(),
+            };
+
+            sender.send(ApplicationEvent::ChunkData(data)).await.unwrap();
         }
         PlayerSpawnPositionS2c::ID => {
             // let packet: PlayerSpawnPositionS2c =
@@ -200,6 +211,9 @@ async fn process_packet(
         }
         SynchronizeTagsS2c::ID => {
             println!("Received SynchronizeTagsS2c.");
+            let packet: SynchronizeTagsS2c =
+                frame.decode().expect("Failed to decode SynchronizeTagsS2c");
+            // println!("Tags: {:?}", packet.groups);
         }
         GameMessageS2c::ID => {
             let packet: GameMessageS2c =
@@ -208,7 +222,6 @@ async fn process_packet(
             println!("Received message: {:?}", received_message);
 
             if received_message.contains("How are you?") {
-                // Send a chat message "ahoj"
                 let message = ChatMessageC2s {
                     message: valence_protocol::Bounded("I feel good. I'm running at 240 MHz.".into()), // The message content
                     timestamp: 0,

@@ -134,6 +134,9 @@ fn process_application_event(
                     material.base_color = Color::rgb(0.0, 1.0, 0.0);
                 }
             }
+            ApplicationEvent::ChunkData(data) => {
+
+            }
         }
     }
 
